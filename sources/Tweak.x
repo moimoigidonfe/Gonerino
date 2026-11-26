@@ -456,7 +456,8 @@ static void SendToast(id object, NSString *message)
     [Util showToast:message fromView:view];
 }
 
-// チャンネルID → ハンドル → 名前の順で登録する。戻り値はトースト用の文言（失敗時は nil）
+// 「Block channel」で登録する種類。設定 GonerinoChannelBlockMode: 0 = ID + handle, 1 = ID のみ, 2 = handle のみ
+// 選んだ種類が読み取れなかったときは、取れたもので登録する。戻り値はトースト用の文言（失敗時は nil）
 static NSString *BlockChannelFromAction(NSString *videoID, NSString *channelName)
 {
     NSDictionary *identity  = [Util channelIdentityForVideoID:videoID];
@@ -465,14 +466,21 @@ static NSString *BlockChannelFromAction(NSString *videoID, NSString *channelName
     if (handle.length == 0 && [channelName hasPrefix:@"@"])
         handle = [ChannelManager normalizedHandle:channelName];
 
+    NSInteger mode =
+        [[NSUserDefaults standardUserDefaults] integerForKey:@"GonerinoChannelBlockMode"];
+    BOOL hasID      = channelID.length > 0;
+    BOOL hasHandle  = handle.length > 0;
+    BOOL saveID     = hasID && (mode != 2 || !hasHandle);
+    BOOL saveHandle = hasHandle && (mode != 1 || !hasID);
+
     ChannelManager *manager = [ChannelManager sharedInstance];
     NSString       *kind    = nil;
-    if (channelID.length > 0)
+    if (saveID)
     {
         [manager addBlockedChannel:channelID label:channelName];
         kind = @"ID";
     }
-    if (handle.length > 0)
+    if (saveHandle)
     {
         [manager addBlockedChannel:handle label:channelName];
         kind = kind ? @"ID + handle" : @"handle";
