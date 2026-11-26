@@ -455,6 +455,7 @@ static void SendToast(id object, NSString *message)
         [object isKindOfClass:[UIView class]] ? object : ExplicitObjectValue(object, @"sourceView");
     [Util showToast:message fromView:view];
 }
+
 // チャンネルID → ハンドル → 名前の順で登録する。戻り値はトースト用の文言（失敗時は nil）
 static NSString *BlockChannelFromAction(NSString *videoID, NSString *channelName)
 {
@@ -486,10 +487,8 @@ static NSString *BlockChannelFromAction(NSString *videoID, NSString *channelName
         kind = @"name";
     }
     NSString *display = channelName.length > 0 ? channelName : (channelID ?: handle);
-    return [NSString stringWithFormat:@"%@ [%@]",
-                                      [NSString stringWithFormat:LocalizedString(@"Blocked %@"),
-                                                                 display],
-                                      kind];
+    NSString *blocked = [NSString stringWithFormat:LocalizedString(@"Blocked %@"), display];
+    return [NSString stringWithFormat:@"%@ [%@]", blocked, kind];
 }
 
 static void MergeAvailableVideoInfo(NSMutableDictionary *result, NSDictionary *candidate)
@@ -707,10 +706,10 @@ static NSArray *MDCBlockingActionsForSheet(id sheet, NSArray *actions)
     __weak id      weakSheet      = sheet;
 
     void (^channelHandler)(id) = ^(__unused id action) {
-        [[ChannelManager sharedInstance] addBlockedChannel:channel];
-        AdvanceShortsAfterBlocking(weakSheet, videoID);
-        SendToast(weakSourceView,
-                  [NSString stringWithFormat:LocalizedString(@"Blocked %@"), channel]);
+        NSString *message = BlockChannelFromAction(videoID, channel);
+        if (message)
+            AdvanceShortsAfterBlocking(weakSheet, videoID);
+        SendToast(weakSourceView, message ?: LocalizedString(@"Could not block this channel"));
     };
     void (^videoHandler)(id) = ^(__unused id action) {
         [[VideoManager sharedInstance] addBlockedVideo:videoID title:videoTitle channel:channel];
@@ -954,7 +953,7 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                  secondaryIconImage:nil
             accessibilityIdentifier:@"GonerinoBlockChannel"
                             handler:^{
-                          ResolveActionVideoInfo(weakSheet, YES, ^(NSDictionary *info) {
+                                ResolveActionVideoInfo(weakSheet, YES, ^(NSDictionary *info) {
                                     @try
                                     {
                                         NSString *channel = info[@"channel"];
@@ -984,6 +983,75 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                                                   LocalizedString(@"Could not block this channel"));
                                     }
                                 });
+                            }];
+
+        YTActionSheetAction *blockVideoAction = [%c(YTActionSheetAction)
+                    actionWithTitle:LocalizedString(@"Block video")
+                          iconImage:[Util createBlockVideoIconWithSize:iconSize]
+                 secondaryIconImage:nil
+            accessibilityIdentifier:@"GonerinoBlockVideo"
+                            handler:^{
+                                ResolveActionVideoInfo(weakSheet, NO, ^(NSDictionary *info) {
+                                    @try
+                                    {
+                                        NSString *videoId = info[@"id"];
+                                        if (videoId.length == 0)
+                                        {
+                                            SendToast(
+                                                weakSheet,
+                                                LocalizedString(
+                                                    @"Could not read the video for this item"));
+                                            return;
+                                        }
+
+                                        NSString *videoTitle =
+                                            [Util isUsableVideoTitle:info[@"title"]]
+                                                ? info[@"title"]
+                                                : @"";
+                                        [[VideoManager sharedInstance]
+                                            addBlockedVideo:videoId
+                                                      title:videoTitle
+                                                    channel:info[@"channel"]];
+                                        AdvanceShortsAfterBlocking(weakSheet, videoId);
+                                        SendToast(
+                                            weakSheet,
+                                            [NSString stringWithFormat:LocalizedString(
+                                                                           @"Blocked video: %@"),
+                                                                       videoTitle.length > 0
+                                                                           ? videoTitle
+                                                                           : videoId]);
+                                    }
+                                    @catch (__unused NSException *exception)
+                                    {
+                                        SendToast(weakSheet,
+                                                  LocalizedString(@"Could not block this video"));
+                                    }
+                                });
+                            }];
+
+        if (!blockChannelAction || !blockVideoAction)
+        {
+            objc_setAssociatedObject(sheet, injectionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            return;
+        }
+
+        blockChannelAction.shouldDismissOnAction = YES;
+        blockVideoAction.shouldDismissOnAction   = YES;
+        objc_setAssociatedObject(sheet, ActionSheetBlockingActionsKey,
+                                 @[ blockChannelAction, blockVideoAction ],
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    @catch (__unused NSException *exception)
+    {
+        objc_setAssociatedObject(sheet, injectionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
 
 static NSArray *ActionsWithBlockingActions(id sheet, NSArray *actions)
 {
