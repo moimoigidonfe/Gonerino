@@ -903,15 +903,56 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
     return cell;
 }
 
+- (void)presentChoiceWithTitle:(NSString *)title
+                       message:(NSString *)message
+                       options:(NSArray<NSString *> *)options
+                 selectedIndex:(NSInteger)selectedIndex
+                    completion:(void (^)(NSInteger index))completion
+{
+    UIAlertController *alert =
+        [UIAlertController alertControllerWithTitle:title
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    for (NSUInteger index = 0; index < options.count; index++)
+    {
+        NSString *optionTitle = (NSInteger) index == selectedIndex
+                                    ? [NSString stringWithFormat:@"✓ %@", options[index]]
+                                    : options[index];
+        [alert addAction:[UIAlertAction actionWithTitle:optionTitle
+                                                  style:UIAlertActionStyleDefault
+                                                handler:^(__unused UIAlertAction *action) {
+                                                    if (completion)
+                                                        completion((NSInteger) index);
+                                                }]];
+    }
+    [alert addAction:[UIAlertAction actionWithTitle:LocalizedString(@"Cancel")
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [self presentViewController:alert animated:YES completion:nil];
+}
+
 - (void)openChannels
 {
     __weak __block SettingsListViewController *weakList;
     __weak typeof(self)                        weakSelf = self;
+    // 表示の絞り込み: 0 = すべて, 1 = Channel ID, 2 = Handle, 3 = Name (legacy)
+    __block NSInteger    listFilter = 0;
+    NSArray<NSString *> *modeTitles = @[
+        LocalizedString(@"ID + handle"), LocalizedString(@"ID only"),
+        LocalizedString(@"Handle only")
+    ];
+    NSArray<NSString *> *filterTitles = @[
+        LocalizedString(@"All"), LocalizedString(@"Channel ID"), LocalizedString(@"Handle"),
+        LocalizedString(@"Name (legacy)")
+    ];
     SettingsListViewController *list = [[SettingsListViewController alloc]
             initWithTitle:LocalizedString(@"Blocked Channels")
         searchPlaceholder:LocalizedString(@"Search channels")
           entriesProvider:^NSArray<SettingsEntry *> * {
-              NSMutableArray *entries = [NSMutableArray array];
+              NSMutableArray      *entries  = [NSMutableArray array];
+              ChannelManager      *manager  = [ChannelManager sharedInstance];
+              NSArray<NSString *> *channels = manager.blockedChannels;
+
               [entries addObject:[SettingsEntry
                                      entryWithTitle:LocalizedString(@"Add Channel")
                                            subtitle:LocalizedString(
@@ -940,14 +981,92 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
                                                                  settingsIntegrationReloadSection];
                                                      });
                                              }]];
-              ChannelManager *manager = [ChannelManager sharedInstance];
-              for (NSString *channel in manager.blockedChannels)
+
+              NSInteger storedMode = [[NSUserDefaults standardUserDefaults]
+                  integerForKey:@"GonerinoChannelBlockMode"];
+              NSInteger mode = (storedMode >= 0 && storedMode <= 2) ? storedMode : 0;
+              [entries addObject:[SettingsEntry
+                                     entryWithTitle:LocalizedString(@"\"Block channel\" saves")
+                                           subtitle:modeTitles[(NSUInteger) mode]
+                                             action:^{
+                                                 [weakSelf
+                                                     presentChoiceWithTitle:
+                                                         LocalizedString(@"\"Block channel\" saves")
+                                                                    message:
+                                                                        LocalizedString(
+                                                                            @"What the menu item "
+                                                                            @"registers. Existing "
+                                                                            @"entries are not "
+                                                                            @"changed.")
+                                                                    options:modeTitles
+                                                              selectedIndex:mode
+                                                                 completion:^(NSInteger index) {
+                                                                     NSUserDefaults *defaults =
+                                                                         [NSUserDefaults
+                                                                             standardUserDefaults];
+                                                                     [defaults
+                                                                         setInteger:index
+                                                                             forKey:
+                                                                                 @"GonerinoChannelBlockMode"];
+                                                                     [defaults synchronize];
+                                                                     [weakList refreshEntries];
+                                                                 }];
+                                             }]];
+
+              NSUInteger idCount     = 0;
+              NSUInteger handleCount = 0;
+              NSUInteger nameCount   = 0;
+              for (NSString *channel in channels)
               {
-                  NSString *label    = [manager labelForChannel:channel];
-                  NSString *kind     = ChannelKindDescription(channel);
-                  NSString *subtitle = label.length > 0
-                                           ? [NSString stringWithFormat:@"%@ · %@", kind, channel]
-                                           : kind;
+                  GNRChannelEntryKind kind = [ChannelManager kindOfEntry:channel];
+                  if (kind == GNRChannelEntryKindID)
+                      idCount++;
+                  else if (kind == GNRChannelEntryKindHandle)
+                      handleCount++;
+                  else
+                      nameCount++;
+              }
+              NSArray<NSNumber *> *filterCounts =
+                  @[ @(channels.count), @(idCount), @(handleCount), @(nameCount) ];
+              NSMutableArray<NSString *> *filterOptions = [NSMutableArray array];
+              for (NSUInteger index = 0; index < filterTitles.count; index++)
+              {
+                  [filterOptions
+                      addObject:[NSString stringWithFormat:@"%@ (%@)", filterTitles[index],
+                                                           filterCounts[index]]];
+              }
+              NSInteger currentFilter = (listFilter >= 0 && listFilter <= 3) ? listFilter : 0;
+              [entries addObject:[SettingsEntry
+                                     entryWithTitle:LocalizedString(@"Show")
+                                           subtitle:filterOptions[(NSUInteger) currentFilter]
+                                             action:^{
+                                                 [weakSelf
+                                                     presentChoiceWithTitle:LocalizedString(@"Show")
+                                                                    message:nil
+                                                                    options:filterOptions
+                                                              selectedIndex:currentFilter
+                                                                 completion:^(NSInteger index) {
+                                                                     listFilter = index;
+                                                                     [weakList refreshEntries];
+                                                                 }];
+                                             }]];
+
+              NSUInteger shownCount = 0;
+              for (NSString *channel in channels)
+              {
+                  GNRChannelEntryKind kind = [ChannelManager kindOfEntry:channel];
+                  if (currentFilter == 1 && kind != GNRChannelEntryKindID)
+                      continue;
+                  if (currentFilter == 2 && kind != GNRChannelEntryKindHandle)
+                      continue;
+                  if (currentFilter == 3 && kind != GNRChannelEntryKindName)
+                      continue;
+                  NSString *label           = [manager labelForChannel:channel];
+                  NSString *kindDescription = ChannelKindDescription(channel);
+                  NSString *subtitle =
+                      label.length > 0
+                          ? [NSString stringWithFormat:@"%@ · %@", kindDescription, channel]
+                          : kindDescription;
                   [entries addObject:[SettingsEntry
                                          entryWithTitle:label.length > 0 ? label : channel
                                                subtitle:subtitle
@@ -957,6 +1076,13 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
                                                [weakSelf.settingsManager
                                                        settingsIntegrationReloadSection];
                                            }]];
+                  shownCount++;
+              }
+              if (shownCount == 0)
+              {
+                  [entries addObject:[SettingsEntry entryWithTitle:LocalizedString(@"No channels")
+                                                          subtitle:nil
+                                                            action:nil]];
               }
               return entries;
           }];
