@@ -35,6 +35,9 @@ extern NSString *const FeedFilterStateDidChangeNotification;
 + (nullable NSString *)feedVideoIDFromThumbnailURL:(nullable NSURL *)url;
 + (nullable NSString *)feedVideoIDForObject:(nullable id)object;
 + (void)setFeedVideoID:(nullable NSString *)videoID forObject:(nullable id)object;
++ (nullable NSDictionary<NSString *, NSString *> *)channelIdentityForVideoID:
+    (nullable NSString *)videoID; // keys: "channelId", "handle"
++ (nullable NSString *)videoIDFromString:(nullable NSString *)text;
 + (BOOL)filteringEnabled;
 + (void)refreshPreferenceSnapshot;
 + (nullable NSDictionary<NSString *, NSString *> *)freshVideoInfoFromNode:(nullable id)node;
