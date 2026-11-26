@@ -20,6 +20,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
       - name: Install tools
         run: brew install make ldid dpkg xz
 
