@@ -1165,8 +1165,8 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 - (void)applyImportedSettings:(NSDictionary *)settings
 {
     if ([settings[@"blockedChannels"] isKindOfClass:[NSArray class]])
-        [[ChannelManager sharedInstance] setBlockedChannels:settings[@"blockedChannels"]];  
-        if ([settings[@"channelLabels"] isKindOfClass:[NSDictionary class]])
+        [[ChannelManager sharedInstance] setBlockedChannels:settings[@"blockedChannels"]];
+    if ([settings[@"channelLabels"] isKindOfClass:[NSDictionary class]])
         [[ChannelManager sharedInstance] setChannelLabels:settings[@"channelLabels"]];
     if ([settings[@"blockedWords"] isKindOfClass:[NSArray class]])
         [[WordManager sharedInstance] setBlockedWords:settings[@"blockedWords"]];
