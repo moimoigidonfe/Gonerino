@@ -509,7 +509,7 @@ static NSString *VideoIdFromText(NSString *text)
     static dispatch_once_t      onceToken;
     dispatch_once(&onceToken, ^{
         regex = [NSRegularExpression
-            regularExpressionWithPattern:@"(?:[?&]v=|youtu\\.be/|/shorts/|/embed/|i\\.ytimg\\.com/"
+            regularExpressionWithPattern:@"(?:[?&]v=|youtu\\.be/|/shorts/|/live/|/embed/|i\\.ytimg\\.com/"
                                          @"vi(?:_webp)?/)([A-Za-z0-9_-]{11})(?:[^A-Za-z0-9_-]|$)"
                                  options:0
                                    error:nil];
@@ -1389,6 +1389,228 @@ static void RecordElementRendererData(NSMutableDictionary *result, NSMutableDict
     }
 }
 
+#pragma mark - Channel identity (channel ID / handle)
+
+static void *ChannelIdentityAssociationKey = &ChannelIdentityAssociationKey;
+
+static NSMutableDictionary<NSString *, NSDictionary<NSString *, NSString *> *> *
+ChannelIdentityStore(void)
+{
+    static NSMutableDictionary *store;
+    static dispatch_once_t      onceToken;
+    dispatch_once(&onceToken, ^{ store = [NSMutableDictionary dictionary]; });
+    return store;
+}
+
+static NSDictionary<NSString *, NSString *> *ChannelIdentityForVideoID(NSString *videoID)
+{
+    if (![videoID isKindOfClass:[NSString class]] || videoID.length == 0)
+        return nil;
+    NSMutableDictionary *store = ChannelIdentityStore();
+    @synchronized(store)
+    {
+        return store[videoID];
+    }
+}
+
+static void RememberChannelIdentity(NSString *videoID, NSString *channelID, NSString *handle)
+{
+    if (![videoID isKindOfClass:[NSString class]] || videoID.length == 0 ||
+        (channelID.length == 0 && handle.length == 0))
+        return;
+    NSMutableDictionary *store = ChannelIdentityStore();
+    @synchronized(store)
+    {
+        NSDictionary *existing       = store[videoID];
+        NSString     *existingID     = existing[@"channelId"];
+        NSString     *existingHandle = existing[@"handle"];
+        NSString     *mergedID       = existingID.length > 0 ? existingID : channelID;
+        NSString     *mergedHandle   = existingHandle.length > 0 ? existingHandle : handle;
+        if (existing && (mergedID == existingID || [mergedID isEqualToString:existingID]) &&
+            (mergedHandle == existingHandle || [mergedHandle isEqualToString:existingHandle]))
+            return;
+        if (!existing && store.count >= 2048)
+        {
+            NSString *oldest = store.keyEnumerator.nextObject;
+            if (oldest)
+                [store removeObjectForKey:oldest];
+        }
+        NSMutableDictionary *entry = [NSMutableDictionary dictionaryWithCapacity:2];
+        if (mergedID.length > 0)
+            entry[@"channelId"] = mergedID;
+        if (mergedHandle.length > 0)
+            entry[@"handle"] = mergedHandle;
+        store[videoID] = entry.copy;
+    }
+}
+
+static BOOL IsChannelIDByte(uint8_t byte)
+{
+    return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+           (byte >= '0' && byte <= '9') || byte == '_' || byte == '-';
+}
+
+static NSString *ChannelIDFromText(NSString *text)
+{
+    NSString *candidate = TrimmedText(text);
+    if (candidate.length < 24)
+        return nil;
+    static NSRegularExpression *regex;
+    static dispatch_once_t      onceToken;
+    dispatch_once(&onceToken, ^{
+        regex = [NSRegularExpression
+            regularExpressionWithPattern:@"(?:^|/channel/)(UC[A-Za-z0-9_-]{22})(?:$|[/?#])"
+                                 options:0
+                                   error:nil];
+    });
+    NSTextCheckingResult *match = [regex firstMatchInString:candidate
+                                                    options:0
+                                                      range:NSMakeRange(0, candidate.length)];
+    return match.numberOfRanges > 1 ? [candidate substringWithRange:[match rangeAtIndex:1]] : nil;
+}
+
+static NSString *HandleFromText(NSString *text)
+{
+    NSString *candidate = TrimmedText(text);
+    if (candidate.length < 2)
+        return nil;
+    if ([candidate hasPrefix:@"@"])
+        return [ChannelManager normalizedHandle:candidate];
+    NSRange marker = [candidate rangeOfString:@"/@"];
+    if (marker.location == NSNotFound)
+        return nil;
+    return [ChannelManager normalizedHandle:[candidate substringFromIndex:marker.location]];
+}
+
+static void RecordChannelIdentityFromObject(id object, NSMutableDictionary *result)
+{
+    if (!object)
+        return;
+    if ([(NSString *) result[@"channelId"] length] == 0)
+    {
+        for (NSString *key in @[
+                 @"channelId", @"channelID", @"ownerChannelId", @"externalChannelId", @"browseId",
+                 @"browseID"
+             ])
+        {
+            NSString *channelID = ChannelIDFromText(TextAtom(DirectNamedValue(object, key)));
+            if (channelID.length > 0)
+            {
+                result[@"channelId"] = channelID;
+                break;
+            }
+        }
+    }
+    if ([(NSString *) result[@"handle"] length] == 0)
+    {
+        for (NSString *key in @[ @"channelHandle", @"canonicalBaseUrl", @"canonicalBaseURL" ])
+        {
+            NSString *handle = HandleFromText(TextAtom(DirectNamedValue(object, key)));
+            if (handle.length > 0)
+            {
+                result[@"handle"] = handle;
+                break;
+            }
+        }
+    }
+}
+
+// protobuf 中の「長さ24の文字列フィールド "UC…"」「/channel/UC…」「長さ付き文字列 "/@handle"」だけを拾う。
+// 長さバイトを確認するので、トークン等の途中に偶然出てくる "UC" は拾わない。
+static void RecordChannelIdentityFromData(NSMutableDictionary *result, NSData *data)
+{
+    if (![data isKindOfClass:[NSData class]] || data.length < 6)
+        return;
+    BOOL needID     = [(NSString *) result[@"channelId"] length] == 0;
+    BOOL needHandle = [(NSString *) result[@"handle"] length] == 0;
+    if (!needID && !needHandle)
+        return;
+
+    const uint8_t *bytes = data.bytes;
+    NSUInteger     limit = MIN(data.length, (NSUInteger) 65536);
+    for (NSUInteger index = 1; index + 1 < limit && (needID || needHandle); index++)
+    {
+        uint8_t byte = bytes[index];
+        if (needID && byte == 'U' && bytes[index + 1] == 'C' && index + 24 <= limit)
+        {
+            BOOL lengthPrefixed = bytes[index - 1] == 24;
+            BOOL pathPrefixed   = index >= 9 && memcmp(bytes + index - 9, "/channel/", 9) == 0;
+            if (!lengthPrefixed && !pathPrefixed)
+                continue;
+            BOOL valid = YES;
+            for (NSUInteger offset = 2; offset < 24; offset++)
+            {
+                if (!IsChannelIDByte(bytes[index + offset]))
+                {
+                    valid = NO;
+                    break;
+                }
+            }
+            if (valid && !lengthPrefixed && index + 24 < limit &&
+                IsChannelIDByte(bytes[index + 24]))
+                valid = NO;
+            if (!valid)
+                continue;
+            NSString *channelID = [[NSString alloc] initWithBytes:bytes + index
+                                                           length:24
+                                                         encoding:NSASCIIStringEncoding];
+            if (channelID.length == 24)
+            {
+                result[@"channelId"] = channelID;
+                needID               = NO;
+            }
+        }
+        else if (needHandle && byte == '/' && bytes[index + 1] == '@')
+        {
+            NSUInteger length = bytes[index - 1];
+            if (length < 4 || length > 127 || index + length > limit ||
+                !IsPrintableUTF8Data(bytes + index, length))
+                continue;
+            NSString *value = [[NSString alloc] initWithBytes:bytes + index
+                                                       length:length
+                                                     encoding:NSUTF8StringEncoding];
+            NSString *handle = HandleFromText(value);
+            if (handle.length > 0)
+            {
+                result[@"handle"] = handle;
+                needHandle        = NO;
+            }
+        }
+    }
+}
+
+static void StoreChannelIdentity(id object, NSDictionary *info)
+{
+    NSString *channelID    = info[@"channelId"];
+    NSString *handle       = info[@"handle"];
+    BOOL      canAssociate = object && object != [NSNull null];
+    if (channelID.length == 0 && handle.length == 0)
+    {
+        // 今回取れなかったら、以前の情報を残さない（別の動画に付け替わるのを防ぐ）
+        if (canAssociate)
+            objc_setAssociatedObject(object, ChannelIdentityAssociationKey, nil,
+                                     OBJC_ASSOCIATION_COPY);
+        return;
+    }
+    NSMutableDictionary *identity = [NSMutableDictionary dictionaryWithCapacity:2];
+    if (channelID.length > 0)
+        identity[@"channelId"] = channelID;
+    if (handle.length > 0)
+        identity[@"handle"] = handle;
+    if (canAssociate)
+        objc_setAssociatedObject(object, ChannelIdentityAssociationKey, identity,
+                                 OBJC_ASSOCIATION_COPY);
+    RememberChannelIdentity(info[@"id"], channelID, handle);
+}
+
+static NSDictionary *PendingChannelIdentity(id object)
+{
+    if (!object || object == [NSNull null])
+        return nil;
+    NSDictionary *identity = objc_getAssociatedObject(object, ChannelIdentityAssociationKey);
+    return [identity isKindOfClass:[NSDictionary class]] ? identity : nil;
+}
+
 static void RecordPlayableEntryDescription(NSMutableDictionary *result,
                                            NSMutableDictionary *priorities, id object)
 {
@@ -1437,6 +1659,24 @@ static void RecordPlayableEntryDescription(NSMutableDictionary *result,
         value           = [value stringByReplacingOccurrencesOfString:@"\\\"" withString:@"\""];
         value           = [value stringByReplacingOccurrencesOfString:@"\\'" withString:@"'"];
         RecordField(result, priorities, pattern[1], value);
+    }
+
+    if ([(NSString *) result[@"channelId"] length] == 0)
+    {
+        static NSRegularExpression *channelRegex;
+        static dispatch_once_t      channelOnceToken;
+        dispatch_once(&channelOnceToken, ^{
+            channelRegex =
+                [NSRegularExpression regularExpressionWithPattern:@"\"(UC[A-Za-z0-9_-]{22})\""
+                                                          options:0
+                                                            error:nil];
+        });
+        NSTextCheckingResult *channelMatch =
+            [channelRegex firstMatchInString:description
+                                     options:0
+                                       range:NSMakeRange(0, description.length)];
+        if (channelMatch.numberOfRanges > 1)
+            result[@"channelId"] = [description substringWithRange:[channelMatch rangeAtIndex:1]];
     }
 }
 
@@ -1854,6 +2094,10 @@ static void AdaptShortsWatchResponse(id response, NSMutableArray<id> *objects,
     AddAdapterObject(objects, visited, headerRenderer);
     AddAdapterObject(objects, visited, accessibility);
     AddAdapterObject(objects, visited, accessibilityData);
+
+    id channelEndpoint = DirectNamedValue(headerRenderer, @"channelNavigationEndpoint");
+    AddAdapterObject(objects, visited, channelEndpoint);
+    AddAdapterObject(objects, visited, DirectNamedValue(channelEndpoint, @"browseEndpoint"));
 }
 
 static void AddBoundedShortsSubnodes(NSMutableArray<id> *objects, NSMutableSet *visited, id node,
@@ -1911,29 +2155,45 @@ static void AddBoundedShortsSubnodes(NSMutableArray<id> *objects, NSMutableSet *
     }
 }
 
+static BOOL MetadataFieldsComplete(NSDictionary *result)
+{
+    return [(NSString *) result[@"id"] length] > 0 && [(NSString *) result[@"title"] length] > 0 &&
+           [(NSString *) result[@"channel"] length] > 0;
+}
+
 static void RecordAdapterObjects(NSArray<id> *objects, NSMutableDictionary *result,
                                  NSMutableDictionary        *priorities,
                                  NSMutableArray<NSString *> *textValues)
 {
+    BOOL fieldsComplete = NO;
     for (id object in objects)
     {
-        RecordDirectMetadataFields(object, result, priorities);
-        if ([(NSString *) result[@"id"] length] > 0 && [(NSString *) result[@"title"] length] > 0 &&
-            [(NSString *) result[@"channel"] length] > 0)
+        if (!fieldsComplete)
+        {
+            RecordDirectMetadataFields(object, result, priorities);
+            fieldsComplete = MetadataFieldsComplete(result);
+        }
+        RecordChannelIdentityFromObject(object, result);
+        if (fieldsComplete && [(NSString *) result[@"channelId"] length] > 0)
             return;
     }
     for (id object in objects)
     {
-        if ([(NSString *) result[@"id"] length] > 0 && [(NSString *) result[@"title"] length] > 0 &&
-            [(NSString *) result[@"channel"] length] > 0)
+        fieldsComplete        = MetadataFieldsComplete(result);
+        BOOL identityComplete = [(NSString *) result[@"channelId"] length] > 0;
+        if (fieldsComplete && identityComplete)
             break;
-        RecordDirectTextMetadata(object, result, priorities, textValues);
+        if (!fieldsComplete)
+            RecordDirectTextMetadata(object, result, priorities, textValues);
         if (RendererDataObject(object))
         {
             NSData *data = DirectObjectValue(object, @"data");
             if (![data isKindOfClass:[NSData class]])
                 data = DirectObjectValue(object, @"elementData");
-            RecordElementRendererData(result, priorities, data);
+            if (!fieldsComplete)
+                RecordElementRendererData(result, priorities, data);
+            if (!identityComplete)
+                RecordChannelIdentityFromData(result, data);
         }
     }
 }
@@ -2101,6 +2361,7 @@ static NSDictionary *FastVideoInfoFromModel(id model)
                              @"ownerName",
                              @"ownerDisplayName",
                              @"ownerNavigationEndpoint",
+                             @"browseEndpoint",
                              @"author",
                              @"authorName",
                              @"creator",
@@ -2201,6 +2462,16 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
     RefreshPreferenceSnapshot();
 }
 
++ (NSDictionary<NSString *, NSString *> *)channelIdentityForVideoID:(NSString *)videoID
+{
+    return ChannelIdentityForVideoID(videoID);
+}
+
++ (NSString *)videoIDFromString:(NSString *)text
+{
+    return VideoIdFromText(text);
+}
+
 + (NSDictionary *)videoInfoFromNode:(id)node
 {
     return [[self feedVideoMetadataFromNode:node] dictionaryRepresentation];
@@ -2236,7 +2507,8 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
             [cache removeObjectForKey:node];
     }
 
-    NSDictionary       *info   = FastVideoInfoFromNode(node) ?: @{};
+    NSDictionary *info = FastVideoInfoFromNode(node) ?: @{};
+    StoreChannelIdentity(node, info);
     FeedMetadataRecord *record = [[FeedMetadataRecord alloc] initWithVideoID:info[@"id"]
                                                                        title:info[@"title"]
                                                                      channel:info[@"channel"]];
@@ -2264,7 +2536,8 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
 {
     if (!model)
         return nil;
-    NSDictionary       *info   = FastVideoInfoFromModel(model) ?: @{};
+    NSDictionary *info = FastVideoInfoFromModel(model) ?: @{};
+    StoreChannelIdentity(model, info);
     FeedMetadataRecord *record = [[FeedMetadataRecord alloc] initWithVideoID:info[@"id"]
                                                                        title:info[@"title"]
                                                                      channel:info[@"channel"]];
@@ -2310,7 +2583,12 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
         FeedMetadataRecord *current = [cache objectForKey:node];
         if (current.videoID.length > 0 && metadata.videoID.length > 0 &&
             ![current.videoID isEqualToString:metadata.videoID])
+        {
+            // 同じオブジェクトが別の動画に切り替わった。前の動画のチャンネル情報は引き継がない
             current = nil;
+            objc_setAssociatedObject(node, ChannelIdentityAssociationKey, nil,
+                                     OBJC_ASSOCIATION_COPY);
+        }
         FeedMetadataRecord *stable = nil;
         if (metadata.videoID.length > 0)
             stable = FeedMetadataByVideoID()[metadata.videoID];
@@ -2321,6 +2599,10 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
         record                     = MetadataRecordByCombining(stable, record);
         if (record.videoID.length > 0)
         {
+            NSDictionary *pending = PendingChannelIdentity(node);
+            if (pending)
+                RememberChannelIdentity(record.videoID, pending[@"channelId"],
+                                        pending[@"handle"]);
             NSMutableDictionary *records = FeedMetadataByVideoID();
             if (records.count >= 512 && !records[record.videoID])
                 [records removeObjectForKey:records.allKeys.firstObject];
@@ -2401,6 +2683,7 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
     {
         [cache removeObjectForKey:node];
     }
+    objc_setAssociatedObject(node, ChannelIdentityAssociationKey, nil, OBJC_ASSOCIATION_COPY);
 }
 
 + (void)resetFeedVideoMetadataForNode:(id)node
@@ -2441,11 +2724,17 @@ static FeedMetadataRecord *MetadataRecordByCombining(FeedMetadataRecord *first,
     if (!FilteringEnabledState)
         return NO;
 
-    BOOL videoBlocked           = [VideoManager.sharedInstance isVideoBlocked:metadata.videoID];
-    BOOL channelBlocked         = [ChannelManager.sharedInstance isChannelBlocked:metadata.channel];
-    BOOL titleBlocked           = [WordManager.sharedInstance isWordBlocked:metadata.title];
-    BOOL metadataChannelBlocked = [WordManager.sharedInstance isWordBlocked:metadata.channel];
-    if (videoBlocked || channelBlocked || titleBlocked || metadataChannelBlocked)
+    if ([VideoManager.sharedInstance isVideoBlocked:metadata.videoID])
+        return YES;
+
+    NSDictionary *identity = ChannelIdentityForVideoID(metadata.videoID)
+                                 ?: PendingChannelIdentity(node);
+    if ([ChannelManager.sharedInstance isChannelBlockedWithID:identity[@"channelId"]
+                                                       handle:identity[@"handle"]
+                                                         name:metadata.channel])
+        return YES;
+
+    if ([WordManager.sharedInstance isBlockedTitle:metadata.title channel:metadata.channel])
         return YES;
 
     if (ObjectIsClassNamed(node, @"ASTextNode"))

@@ -70,6 +70,49 @@ static UIButton *NavigationBackButton(NSString *title, id target, SEL action)
     return button;
 }
 
+
+static void PresentTextInputAlert(UIViewController *presenter, NSString *title, NSString *message,
+                                  NSString *placeholder, void (^completion)(NSString *text))
+{
+    UIAlertController *alert =
+        [UIAlertController alertControllerWithTitle:title
+                                            message:message
+                                     preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *textField) {
+        textField.placeholder            = placeholder;
+        textField.autocapitalizationType = UITextAutocapitalizationTypeNone;
+        textField.autocorrectionType     = UITextAutocorrectionTypeNo;
+    }];
+    __weak UIAlertController *weakAlert = alert;
+    [alert addAction:[UIAlertAction
+                         actionWithTitle:LocalizedString(@"Add")
+                                   style:UIAlertActionStyleDefault
+                                 handler:^(__unused UIAlertAction *action) {
+                                     NSString *text = [weakAlert.textFields.firstObject.text
+                                         stringByTrimmingCharactersInSet:
+                                             [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                                     if (text.length > 0 && completion)
+                                         completion(text);
+                                 }]];
+    [alert addAction:[UIAlertAction actionWithTitle:LocalizedString(@"Cancel")
+                                              style:UIAlertActionStyleCancel
+                                            handler:nil]];
+    [presenter presentViewController:alert animated:YES completion:nil];
+}
+
+static NSString *ChannelKindDescription(NSString *entry)
+{
+    switch ([ChannelManager kindOfEntry:entry])
+    {
+        case GNRChannelEntryKindID:
+            return LocalizedString(@"Channel ID");
+        case GNRChannelEntryKindHandle:
+            return LocalizedString(@"Handle");
+        default:
+            return LocalizedString(@"Name (legacy)");
+    }
+}
+
 @interface                                   SettingsEntry : NSObject
 @property (nonatomic, copy) NSString        *title;
 @property (nonatomic, copy) NSString        *subtitle;
@@ -864,71 +907,60 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 {
     __weak __block SettingsListViewController *weakList;
     __weak typeof(self)                        weakSelf = self;
-    SettingsListViewController                *list     = [[SettingsListViewController alloc]
+    SettingsListViewController *list = [[SettingsListViewController alloc]
             initWithTitle:LocalizedString(@"Blocked Channels")
         searchPlaceholder:LocalizedString(@"Search channels")
-          entriesProvider:^NSArray<SettingsEntry *>                    *{
+          entriesProvider:^NSArray<SettingsEntry *> * {
               NSMutableArray *entries = [NSMutableArray array];
-              [entries
-                  addObject:
-                      [SettingsEntry
-                          entryWithTitle:LocalizedString(@"Add Channel")
-                                subtitle:LocalizedString(@"Block a new channel")
-                                  action:^{
-                                      UIAlertController *alert = [UIAlertController
-                                          alertControllerWithTitle:LocalizedString(@"Add Channel")
-                                                           message:LocalizedString(
-                                                                       @"Enter the channel name to "
-                                                                       @"block")
-                                                    preferredStyle:UIAlertControllerStyleAlert];
-                                      [alert addTextFieldWithConfigurationHandler:^(
-                                                 UITextField *textField) {
-                                          textField.placeholder = LocalizedString(@"Channel Name");
-                                      }];
-                                      [alert
-                                          addAction:
-                                              [UIAlertAction
-                                                  actionWithTitle:LocalizedString(@"Add")
-                                                            style:UIAlertActionStyleDefault
-                                                          handler:^(
-                                                              __unused UIAlertAction *action) {
-                                                              NSString *channel = [alert.textFields
-                                                                                       .firstObject
-                                                                                       .text
-                                                                  stringByTrimmingCharactersInSet:
-                                                                      [NSCharacterSet
-                                                                          whitespaceAndNewlineCharacterSet]];
-                                                              if (channel.length == 0)
-                                                                  return;
-                                                              [[ChannelManager sharedInstance]
-                                                                  addBlockedChannel:channel];
-                                                              [weakList refreshEntries];
-                                                              [weakSelf.settingsManager
-                                                                      settingsIntegrationReloadSection];
-                                                          }]];
-                                      [alert
-                                          addAction:[UIAlertAction
-                                                        actionWithTitle:LocalizedString(@"Cancel")
-                                                                  style:UIAlertActionStyleCancel
-                                                                handler:nil]];
-                                      [weakSelf presentViewController:alert
-                                                             animated:YES
-                                                           completion:nil];
-                                  }]];
-              for (NSString *channel in [ChannelManager sharedInstance].blockedChannels)
+              [entries addObject:[SettingsEntry
+                                     entryWithTitle:LocalizedString(@"Add Channel")
+                                           subtitle:LocalizedString(
+                                                        @"Channel ID, @handle or channel URL")
+                                             action:^{
+                                                 PresentTextInputAlert(
+                                                     weakSelf, LocalizedString(@"Add Channel"),
+                                                     LocalizedString(@"Enter a channel ID (UC…), "
+                                                                     @"@handle or channel URL"),
+                                                     @"UC… / @handle / URL", ^(NSString *text) {
+                                                         NSString *entry = [ChannelManager
+                                                             normalizedEntryFromInput:text];
+                                                         if (!entry)
+                                                             return;
+                                                         [[ChannelManager sharedInstance]
+                                                             addBlockedChannel:entry];
+                                                         if ([ChannelManager kindOfEntry:entry] ==
+                                                             GNRChannelEntryKindName)
+                                                             ShowToast(
+                                                                 weakSelf,
+                                                                 LocalizedString(
+                                                                     @"Added as a channel name "
+                                                                     @"(not an ID or handle)"));
+                                                         [weakList refreshEntries];
+                                                         [weakSelf.settingsManager
+                                                                 settingsIntegrationReloadSection];
+                                                     });
+                                             }]];
+              ChannelManager *manager = [ChannelManager sharedInstance];
+              for (NSString *channel in manager.blockedChannels)
               {
-                  [entries addObject:[SettingsEntry entryWithTitle:channel
-                                                          subtitle:nil
-                                                      deleteAction:^{
-                                                          [[ChannelManager sharedInstance]
-                                                              removeBlockedChannel:channel];
-                                                          [weakSelf.settingsManager
-                                                                  settingsIntegrationReloadSection];
-                                                      }]];
+                  NSString *label    = [manager labelForChannel:channel];
+                  NSString *kind     = ChannelKindDescription(channel);
+                  NSString *subtitle = label.length > 0
+                                           ? [NSString stringWithFormat:@"%@ · %@", kind, channel]
+                                           : kind;
+                  [entries addObject:[SettingsEntry
+                                         entryWithTitle:label.length > 0 ? label : channel
+                                               subtitle:subtitle
+                                           deleteAction:^{
+                                               [[ChannelManager sharedInstance]
+                                                   removeBlockedChannel:channel];
+                                               [weakSelf.settingsManager
+                                                       settingsIntegrationReloadSection];
+                                           }]];
               }
               return entries;
           }];
-    weakList                                            = list;
+    weakList = list;
     [self.navigationController pushViewController:list animated:YES];
 }
 
@@ -936,12 +968,41 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 {
     __weak __block SettingsListViewController *weakList;
     __weak typeof(self)                        weakSelf = self;
-    SettingsListViewController                *list     = [[SettingsListViewController alloc]
+    SettingsListViewController *list = [[SettingsListViewController alloc]
             initWithTitle:LocalizedString(@"Blocked Videos")
         searchPlaceholder:LocalizedString(@"Search videos")
-          entriesProvider:^NSArray<SettingsEntry *>                    *{
+          entriesProvider:^NSArray<SettingsEntry *> * {
               NSMutableArray *entries = [NSMutableArray array];
-              NSArray        *videos  = [VideoManager sharedInstance].blockedVideos;
+              [entries addObject:[SettingsEntry
+                                     entryWithTitle:LocalizedString(@"Add Video")
+                                           subtitle:LocalizedString(@"Video ID or video URL")
+                                             action:^{
+                                                 PresentTextInputAlert(
+                                                     weakSelf, LocalizedString(@"Add Video"),
+                                                     LocalizedString(
+                                                         @"Enter a video ID or video URL"),
+                                                     @"dQw4w9WgXcQ / URL", ^(NSString *text) {
+                                                         NSString *videoID =
+                                                             [Util videoIDFromString:text];
+                                                         if (videoID.length == 0)
+                                                         {
+                                                             ShowToast(
+                                                                 weakSelf,
+                                                                 LocalizedString(
+                                                                     @"Not a valid video ID or "
+                                                                     @"URL"));
+                                                             return;
+                                                         }
+                                                         [[VideoManager sharedInstance]
+                                                             addBlockedVideo:videoID
+                                                                       title:@""
+                                                                     channel:@""];
+                                                         [weakList refreshEntries];
+                                                         [weakSelf.settingsManager
+                                                                 settingsIntegrationReloadSection];
+                                                     });
+                                             }]];
+              NSArray *videos = [VideoManager sharedInstance].blockedVideos;
               if (videos.count == 0)
               {
                   [entries
@@ -968,7 +1029,7 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
               }
               return entries;
           }];
-    weakList                                            = list;
+    weakList = list;
     [self.navigationController pushViewController:list animated:YES];
 }
 
@@ -976,72 +1037,56 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 {
     __weak __block SettingsListViewController *weakList;
     __weak typeof(self)                        weakSelf = self;
-    SettingsListViewController                *list     = [[SettingsListViewController alloc]
+    SettingsListViewController *list = [[SettingsListViewController alloc]
             initWithTitle:LocalizedString(@"Blocked Words")
         searchPlaceholder:LocalizedString(@"Search words")
-          entriesProvider:^NSArray<SettingsEntry *>                    *{
+          entriesProvider:^NSArray<SettingsEntry *> * {
               NSMutableArray *entries = [NSMutableArray array];
-              [entries
-                  addObject:
-                      [SettingsEntry
-                          entryWithTitle:LocalizedString(@"Add Word")
-                                subtitle:LocalizedString(@"Block a new word or phrase")
-                                  action:^{
-                                      UIAlertController *alert = [UIAlertController
-                                          alertControllerWithTitle:LocalizedString(@"Add Word")
-                                                           message:LocalizedString(
-                                                                       @"Enter a word or phrase to "
-                                                                       @"block")
-                                                    preferredStyle:UIAlertControllerStyleAlert];
-                                      [alert addTextFieldWithConfigurationHandler:^(
-                                                 UITextField *textField) {
-                                          textField.placeholder =
-                                              LocalizedString(@"Word or phrase");
-                                      }];
-                                      [alert
-                                          addAction:
-                                              [UIAlertAction
-                                                  actionWithTitle:LocalizedString(@"Add")
-                                                            style:UIAlertActionStyleDefault
-                                                          handler:^(
-                                                              __unused UIAlertAction *action) {
-                                                              NSString *word = [alert.textFields
-                                                                                    .firstObject
-                                                                                    .text
-                                                                  stringByTrimmingCharactersInSet:
-                                                                      [NSCharacterSet
-                                                                          whitespaceAndNewlineCharacterSet]];
-                                                              if (word.length == 0)
-                                                                  return;
-                                                              [[WordManager sharedInstance]
-                                                                  addBlockedWord:word];
-                                                              [weakList refreshEntries];
-                                                              [weakSelf.settingsManager
-                                                                      settingsIntegrationReloadSection];
-                                                          }]];
-                                      [alert
-                                          addAction:[UIAlertAction
-                                                        actionWithTitle:LocalizedString(@"Cancel")
-                                                                  style:UIAlertActionStyleCancel
-                                                                handler:nil]];
-                                      [weakSelf presentViewController:alert
-                                                             animated:YES
-                                                           completion:nil];
-                                  }]];
+              [entries addObject:[SettingsEntry
+                                     entryWithTitle:LocalizedString(@"Add Word")
+                                           subtitle:LocalizedString(
+                                                        @"Word, /regex/i, or !exception")
+                                             action:^{
+                                                 PresentTextInputAlert(
+                                                     weakSelf, LocalizedString(@"Add Word"),
+                                                     LocalizedString(
+                                                         @"word = contains\n/pattern/i = regular "
+                                                         @"expression\n!rule = exception\ntitle: / "
+                                                         @"channel: = limit the target"),
+                                                     LocalizedString(@"Word or phrase"),
+                                                     ^(NSString *text) {
+                                                         if (![WordManager validateRule:text
+                                                                                  error:nil])
+                                                         {
+                                                             ShowToast(
+                                                                 weakSelf,
+                                                                 LocalizedString(
+                                                                     @"Invalid rule or regular "
+                                                                     @"expression"));
+                                                             return;
+                                                         }
+                                                         [[WordManager sharedInstance]
+                                                             addBlockedWord:text];
+                                                         [weakList refreshEntries];
+                                                         [weakSelf.settingsManager
+                                                                 settingsIntegrationReloadSection];
+                                                     });
+                                             }]];
               for (NSString *word in [WordManager sharedInstance].blockedWords)
               {
-                  [entries addObject:[SettingsEntry entryWithTitle:word
-                                                          subtitle:nil
-                                                      deleteAction:^{
-                                                          [[WordManager sharedInstance]
-                                                              removeBlockedWord:word];
-                                                          [weakSelf.settingsManager
-                                                                  settingsIntegrationReloadSection];
-                                                      }]];
+                  [entries addObject:[SettingsEntry
+                                         entryWithTitle:word
+                                               subtitle:[WordManager summaryForRule:word]
+                                           deleteAction:^{
+                                               [[WordManager sharedInstance]
+                                                   removeBlockedWord:word];
+                                               [weakSelf.settingsManager
+                                                       settingsIntegrationReloadSection];
+                                           }]];
               }
               return entries;
           }];
-    weakList                                            = list;
+    weakList = list;
     [self.navigationController pushViewController:list animated:YES];
 }
 
@@ -1049,7 +1094,8 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     return @{
-        @"blockedChannels" : [ChannelManager sharedInstance].blockedChannels,
+        @"blockedChannels" : [ChannelManager sharedInstance].blockedChannels,   
+        @"channelLabels" : [ChannelManager sharedInstance].channelLabels,   // ← 追加
         @"blockedVideos" : [VideoManager sharedInstance].blockedVideos,
         @"blockedWords" : [WordManager sharedInstance].blockedWords,
         @"gonerinoEnabled" : @([defaults objectForKey:@"GonerinoEnabled"] == nil
@@ -1119,7 +1165,9 @@ static NSAttributedString *RenderedGonerinoChangelog(void)
 - (void)applyImportedSettings:(NSDictionary *)settings
 {
     if ([settings[@"blockedChannels"] isKindOfClass:[NSArray class]])
-        [[ChannelManager sharedInstance] setBlockedChannels:settings[@"blockedChannels"]];
+        [[ChannelManager sharedInstance] setBlockedChannels:settings[@"blockedChannels"]];  
+        if ([settings[@"channelLabels"] isKindOfClass:[NSDictionary class]])
+        [[ChannelManager sharedInstance] setChannelLabels:settings[@"channelLabels"]];
     if ([settings[@"blockedWords"] isKindOfClass:[NSArray class]])
         [[WordManager sharedInstance] setBlockedWords:settings[@"blockedWords"]];
     if ([settings[@"blockedVideos"] isKindOfClass:[NSArray class]])

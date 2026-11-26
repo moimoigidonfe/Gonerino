@@ -455,6 +455,42 @@ static void SendToast(id object, NSString *message)
         [object isKindOfClass:[UIView class]] ? object : ExplicitObjectValue(object, @"sourceView");
     [Util showToast:message fromView:view];
 }
+// チャンネルID → ハンドル → 名前の順で登録する。戻り値はトースト用の文言（失敗時は nil）
+static NSString *BlockChannelFromAction(NSString *videoID, NSString *channelName)
+{
+    NSDictionary *identity  = [Util channelIdentityForVideoID:videoID];
+    NSString     *channelID = identity[@"channelId"];
+    NSString     *handle    = identity[@"handle"];
+    if (handle.length == 0 && [channelName hasPrefix:@"@"])
+        handle = [ChannelManager normalizedHandle:channelName];
+
+    ChannelManager *manager = [ChannelManager sharedInstance];
+    NSString       *kind    = nil;
+    if (channelID.length > 0)
+    {
+        [manager addBlockedChannel:channelID label:channelName];
+        kind = @"ID";
+    }
+    if (handle.length > 0)
+    {
+        [manager addBlockedChannel:handle label:channelName];
+        kind = kind ? @"ID + handle" : @"handle";
+    }
+    if (!kind)
+    {
+        if (channelName.length == 0)
+            return nil;
+        [manager addBlockedChannel:channelName];
+        if (![manager isChannelBlocked:channelName])
+            return nil;
+        kind = @"name";
+    }
+    NSString *display = channelName.length > 0 ? channelName : (channelID ?: handle);
+    return [NSString stringWithFormat:@"%@ [%@]",
+                                      [NSString stringWithFormat:LocalizedString(@"Blocked %@"),
+                                                                 display],
+                                      kind];
+}
 
 static void MergeAvailableVideoInfo(NSMutableDictionary *result, NSDictionary *candidate)
 {
@@ -602,11 +638,11 @@ static NSArray *MenuBlockingActions(NSDictionary *metadata, YTActionSheetAction 
              secondaryIconImage:nil
         accessibilityIdentifier:@"GonerinoBlockChannel"
                         handler:^{
-                            [[ChannelManager sharedInstance] addBlockedChannel:channel];
-                            AdvanceShortsAfterBlocking(sourceView, videoID);
+                            NSString *message = BlockChannelFromAction(videoID, channel);
+                            if (message)
+                                AdvanceShortsAfterBlocking(sourceView, videoID);
                             SendToast(weakSourceView,
-                                      [NSString stringWithFormat:LocalizedString(@"Blocked %@"),
-                                                                 channel]);
+                                      message ?: LocalizedString(@"Could not block this channel"));
                         }];
 
     YTActionSheetAction *blockVideoAction = [%c(YTActionSheetAction)
@@ -918,7 +954,7 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                  secondaryIconImage:nil
             accessibilityIdentifier:@"GonerinoBlockChannel"
                             handler:^{
-                                ResolveActionVideoInfo(weakSheet, YES, ^(NSDictionary *info) {
+                          ResolveActionVideoInfo(weakSheet, YES, ^(NSDictionary *info) {
                                     @try
                                     {
                                         NSString *channel = info[@"channel"];
@@ -930,10 +966,9 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                                                     @"Could not read the channel for this video"));
                                             return;
                                         }
-
-                                        [[ChannelManager sharedInstance] addBlockedChannel:channel];
-                                        if (![[ChannelManager sharedInstance]
-                                                isChannelBlocked:channel])
+                                        NSString *message =
+                                            BlockChannelFromAction(info[@"id"], channel);
+                                        if (!message)
                                         {
                                             SendToast(weakSheet,
                                                       LocalizedString(@"Could not read a valid "
@@ -941,10 +976,7 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                                             return;
                                         }
                                         AdvanceShortsAfterBlocking(weakSheet, info[@"id"]);
-                                        SendToast(weakSheet,
-                                                  [NSString stringWithFormat:LocalizedString(
-                                                                                 @"Blocked %@"),
-                                                                             channel]);
+                                        SendToast(weakSheet, message);
                                     }
                                     @catch (__unused NSException *exception)
                                     {
@@ -952,75 +984,6 @@ static void AddBlockingActions(id sheet, YTActionSheetAction *originalAction)
                                                   LocalizedString(@"Could not block this channel"));
                                     }
                                 });
-                            }];
-
-        YTActionSheetAction *blockVideoAction = [%c(YTActionSheetAction)
-                    actionWithTitle:LocalizedString(@"Block video")
-                          iconImage:[Util createBlockVideoIconWithSize:iconSize]
-                 secondaryIconImage:nil
-            accessibilityIdentifier:@"GonerinoBlockVideo"
-                            handler:^{
-                                ResolveActionVideoInfo(weakSheet, NO, ^(NSDictionary *info) {
-                                    @try
-                                    {
-                                        NSString *videoId = info[@"id"];
-                                        if (videoId.length == 0)
-                                        {
-                                            SendToast(
-                                                weakSheet,
-                                                LocalizedString(
-                                                    @"Could not read the video for this item"));
-                                            return;
-                                        }
-
-                                        NSString *videoTitle =
-                                            [Util isUsableVideoTitle:info[@"title"]]
-                                                ? info[@"title"]
-                                                : @"";
-                                        [[VideoManager sharedInstance]
-                                            addBlockedVideo:videoId
-                                                      title:videoTitle
-                                                    channel:info[@"channel"]];
-                                        AdvanceShortsAfterBlocking(weakSheet, videoId);
-                                        SendToast(
-                                            weakSheet,
-                                            [NSString stringWithFormat:LocalizedString(
-                                                                           @"Blocked video: %@"),
-                                                                       videoTitle.length > 0
-                                                                           ? videoTitle
-                                                                           : videoId]);
-                                    }
-                                    @catch (__unused NSException *exception)
-                                    {
-                                        SendToast(weakSheet,
-                                                  LocalizedString(@"Could not block this video"));
-                                    }
-                                });
-                            }];
-
-        if (!blockChannelAction || !blockVideoAction)
-        {
-            objc_setAssociatedObject(sheet, injectionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
-                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            return;
-        }
-
-        blockChannelAction.shouldDismissOnAction = YES;
-        blockVideoAction.shouldDismissOnAction   = YES;
-        objc_setAssociatedObject(sheet, ActionSheetBlockingActionsKey,
-                                 @[ blockChannelAction, blockVideoAction ],
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    @catch (__unused NSException *exception)
-    {
-        objc_setAssociatedObject(sheet, injectionKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(sheet, injectionInProgressKey, nil,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-}
 
 static NSArray *ActionsWithBlockingActions(id sheet, NSArray *actions)
 {
