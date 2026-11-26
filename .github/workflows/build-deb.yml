@@ -1,0 +1,52 @@
+name: Build deb
+
+on:
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "rootless (Dopamine / palera1n rootless) or rootful"
+        type: choice
+        options:
+          - rootless
+          - rootful
+        default: rootless
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install tools
+        run: brew install make ldid dpkg xz
+
+      - name: Set up Theos
+        run: |
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Download iOS SDKs
+        run: |
+          git clone --depth=1 https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          mv "$RUNNER_TEMP"/sdks/*.sdk "$HOME/theos/sdks/"
+
+      - name: Download YouTubeHeader
+        run: |
+          git clone --depth=1 https://github.com/PoomSmart/YouTubeHeader.git "$HOME/theos/include/YouTubeHeader"
+
+      - name: Build package
+        run: |
+          if [ "${{ inputs.scheme }}" = "rootless" ]; then
+            gmake package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          else
+            gmake package FINALPACKAGE=1
+          fi
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gonerino-${{ inputs.scheme }}
+          path: packages/*.deb
